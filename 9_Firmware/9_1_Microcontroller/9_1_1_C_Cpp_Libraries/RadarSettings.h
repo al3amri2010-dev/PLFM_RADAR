@@ -2,6 +2,7 @@
 #define RADARSETTINGS_H
 
 #include <cstdint>
+#include "scan_config.h"
 
 class RadarSettings {
 public:
@@ -22,6 +23,14 @@ public:
     double getPRF2() const { return prf2; }
     double getMaxDistance() const { return max_distance; }
     double getMapSize() const { return map_size; }
+
+    // Optional scan block ("SCN"); defaults to the legacy scan plan
+    const scan_config_t& getScanConfig() const { return scan_config; }
+    bool hasScanConfig() const { return has_scan_config; }
+
+    // Packet sizes: legacy, and legacy + "SCN" scan block
+    static constexpr uint32_t PACKET_SIZE_LEGACY = 82;
+    static constexpr uint32_t PACKET_SIZE_WITH_SCAN = 98;
     
     // Check if settings are valid
     bool isValid() const { return settings_valid; }
@@ -41,6 +50,9 @@ private:
     double prf2;                  // Hz
     double max_distance;          // meters
     double map_size;              // meters
+
+    scan_config_t scan_config;
+    bool has_scan_config;
     
     bool settings_valid;
     
@@ -48,6 +60,7 @@ private:
     bool validateSettings();
     double extractDouble(const uint8_t* data);
     uint32_t extractUint32(const uint8_t* data);
+    uint16_t extractUint16(const uint8_t* data);
 };
 
 #endif // RADARSETTINGS_H

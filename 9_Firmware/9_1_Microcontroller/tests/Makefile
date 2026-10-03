@@ -81,7 +81,10 @@ TESTS_WITH_CXX := test_agc_outer_loop
 # GPS driver tests (need mocks + GPS source + -lm)
 TESTS_GPS := test_um982_gps
 
-ALL_TESTS := $(TESTS_WITH_REAL) $(TESTS_MOCK_ONLY) $(TESTS_STANDALONE) $(TESTS_WITH_PLATFORM) $(TESTS_WITH_CXX) $(TESTS_GPS)
+# Scan plan + settings packet tests (pure logic, need scan_config.c / -lm)
+TESTS_SCAN := test_scan_config test_radar_settings_scan
+
+ALL_TESTS := $(TESTS_WITH_REAL) $(TESTS_MOCK_ONLY) $(TESTS_STANDALONE) $(TESTS_WITH_PLATFORM) $(TESTS_WITH_CXX) $(TESTS_GPS) $(TESTS_SCAN)
 
 .PHONY: all build test clean \
         $(addprefix test_,bug1 bug2 bug3 bug4 bug5 bug6 bug7 bug8 bug9 bug10 bug11 bug12 bug13 bug14 bug15) \
@@ -283,6 +286,17 @@ test_gap3_wdog: test_gap3_health_watchdog_cold_start
 	./test_gap3_health_watchdog_cold_start
 
 # --- Clean ---
+
+SCAN_SRC := ../9_1_1_C_Cpp_Libraries/scan_config.c
+
+scan_config.o: $(SCAN_SRC)
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+test_scan_config: test_scan_config.c scan_config.o
+	$(CC) $(CFLAGS) $(INCLUDES) $< scan_config.o -lm -o $@
+
+test_radar_settings_scan: test_radar_settings_scan.cpp scan_config.o ../9_1_1_C_Cpp_Libraries/RadarSettings.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $< ../9_1_1_C_Cpp_Libraries/RadarSettings.cpp scan_config.o -lm -o $@
 
 clean:
 	rm -f *.o $(ALL_TESTS)

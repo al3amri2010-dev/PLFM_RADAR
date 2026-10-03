@@ -182,7 +182,14 @@ always @(posedge clk or negedge reset_n) begin
             // Pass through toggle signals
             if (stm32_chirp_toggle) begin
                 mc_new_chirp <= ~mc_new_chirp;  // Toggle output
-                use_long_chirp <= 1'b1;         // Default to long chirp
+                // The STM32 (executeChirpSequence) and the TX FSM
+                // (plfm_chirp_controller) both send the first half of each
+                // burst as long chirps and the second half as short chirps.
+                // chirp_count is the index of the chirp starting now.
+                if (cfg_chirps_per_elev < 6'd2)
+                    use_long_chirp <= 1'b1;
+                else
+                    use_long_chirp <= (chirp_count < (cfg_chirps_per_elev >> 1));
 
                 // Track chirp count (Gap 2: use runtime cfg_chirps_per_elev)
                 if (chirp_count < cfg_chirps_per_elev - 1)

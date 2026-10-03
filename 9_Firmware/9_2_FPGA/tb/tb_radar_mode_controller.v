@@ -653,6 +653,45 @@ module tb_radar_mode_controller;
         check(chirp_count === 6'd0, "Persistence: chirp_count wraps to 0 at 4th toggle");
 
         // ════════════════════════════════════════════════════════
+        // TEST GROUP 15b: STM32 Mode — long/short chirp labelling
+        // First half of each burst is long, second half short, matching
+        // executeChirpSequence() and plfm_chirp_controller.
+        // ════════════════════════════════════════════════════════
+        $display("\n--- Test Group 15b: STM32 Mode Long/Short Labelling ---");
+        apply_reset;
+        mode = 2'b00;
+        @(posedge clk); #1;
+
+        // SIM_CHIRPS = 4 → chirps 0,1 long; 2,3 short; then wrap to long
+        for (i = 0; i < 2 * SIM_CHIRPS; i = i + 1) begin
+            stm32_new_chirp = ~stm32_new_chirp;
+            @(posedge clk); @(posedge clk); #1;
+            check(use_long_chirp === (((i % SIM_CHIRPS) < (SIM_CHIRPS / 2)) ? 1'b1 : 1'b0),
+                  "Labelling: use_long_chirp matches burst position");
+        end
+
+        // Elevation toggle restarts the burst: next chirp is long again
+        stm32_new_chirp = ~stm32_new_chirp;   // chirp 0 (long)
+        @(posedge clk); @(posedge clk); #1;
+        stm32_new_chirp = ~stm32_new_chirp;   // chirp 1 (long)
+        @(posedge clk); @(posedge clk); #1;
+        stm32_new_chirp = ~stm32_new_chirp;   // chirp 2 (short)
+        @(posedge clk); @(posedge clk); #1;
+        check(use_long_chirp === 1'b0, "Labelling: third chirp of burst is short");
+        stm32_new_elevation = ~stm32_new_elevation;
+        @(posedge clk); @(posedge clk); #1;
+        stm32_new_chirp = ~stm32_new_chirp;
+        @(posedge clk); @(posedge clk); #1;
+        check(use_long_chirp === 1'b1, "Labelling: first chirp after elevation step is long");
+
+        // Degenerate burst length of 1: never label as short
+        cfg_chirps_per_elev = 6'd1;
+        stm32_new_chirp = ~stm32_new_chirp;
+        @(posedge clk); @(posedge clk); #1;
+        check(use_long_chirp === 1'b1, "Labelling: chirps_per_elev=1 stays long");
+        cfg_chirps_per_elev = SIM_CHIRPS;
+
+        // ════════════════════════════════════════════════════════
         // TEST GROUP 16: Runtime Timing Reconfiguration (Gap 2)
         // Verify that changing cfg_* mid-simulation changes timing.
         // We halve the long chirp duration and verify the chirp

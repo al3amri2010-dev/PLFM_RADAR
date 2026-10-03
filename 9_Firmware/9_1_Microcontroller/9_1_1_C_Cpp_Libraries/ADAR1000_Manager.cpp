@@ -226,14 +226,14 @@ void ADAR1000Manager::fastRXMode() {
     current_mode_ = BeamDirection::RX;
 }
 
+// pulseTXMode()/pulseRXMode() run inside the microsecond chirp loop
+// (executeChirpSequence): no logging here, a printf would distort PRI timing.
 void ADAR1000Manager::pulseTXMode() {
-    DIAG("BF", "pulseTXMode(): TR switch only");
     setADTR1107Control(true);
     last_switch_time_us_ = HAL_GetTick() * 1000;
 }
 
 void ADAR1000Manager::pulseRXMode() {
-    DIAG("BF", "pulseRXMode(): TR switch only");
     setADTR1107Control(false);
     last_switch_time_us_ = HAL_GetTick() * 1000;
 }

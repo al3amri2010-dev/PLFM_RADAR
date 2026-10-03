@@ -20,6 +20,7 @@
 #include "main.h"
 #include "usb_device.h"
 #include "USBHandler.h"
+#include "scan_config.h"
 #include "usbd_cdc_if.h"
 #include "ADAR1000_Manager.h"
 #include "ADAR1000_AGC.h"
@@ -504,70 +505,112 @@ void executeChirpSequence(int num_chirps, float T1, float PRI1, float T2, float 
     }
 }
 
+// Active scan plan.  Starts as the legacy plan (identical to the original
+// hard-coded sequence) and is replaced only at a revolution boundary by a
+// validated plan received from the host (RadarSettings "SCN" block).
+static scan_config_t active_scan_cfg;
+static scan_dwell_t  active_dwells[SCAN_MAX_DWELLS];
+static uint8_t       active_dwell_count = 0;
+static uint8_t       azimuth_index = 0;   // 0 .. azimuth_positions-1
+
+static bool scanConfigEqual(const scan_config_t& a, const scan_config_t& b) {
+    return a.pattern == b.pattern &&
+           a.uniform_beams == b.uniform_beams &&
+           a.uniform_max_angle_deg == b.uniform_max_angle_deg &&
+           a.azimuth_positions == b.azimuth_positions &&
+           a.step_half_period_us == b.step_half_period_us;
+}
+
+// Rebuild the dwell list; on any failure the current plan stays in force.
+static bool applyScanConfig(const scan_config_t& cfg) {
+    scan_dwell_t dwells[SCAN_MAX_DWELLS];
+    if (scan_config_validate(&cfg) != SCAN_OK) return false;
+    uint8_t n = scan_build_dwells(&cfg, dwells, SCAN_MAX_DWELLS);
+    if (n == 0) return false;
+    memcpy(active_dwells, dwells, sizeof(dwells));
+    active_dwell_count = n;
+    active_scan_cfg = cfg;
+    return true;
+}
+
+static void setDwellBeam(const scan_dwell_t& dwell) {
+    uint8_t phases[16];
+    for (int element = 0; element < 16; element++) {
+        phases[element] = degreesTo7BitPhase(element * dwell.phase_step_deg);
+    }
+    adarManager.setCustomBeamPattern16(phases, ADAR1000Manager::BeamDirection::TX);
+    adarManager.setCustomBeamPattern16(phases, ADAR1000Manager::BeamDirection::RX);
+}
+
 void runRadarPulseSequence() {
     static int sequence_count = 0;
     char msg[50];
 
+    // Revolution boundary: first call, or adopt a new host scan plan
+    if (azimuth_index == 0) {
+        if (active_dwell_count == 0) {
+            scan_config_t legacy;
+            scan_config_default(&legacy);
+            applyScanConfig(legacy);
+        }
+        // Settings are written from the USB CDC interrupt: snapshot them
+        // with interrupts masked so a half-written packet is never used.
+        scan_config_t host_cfg;
+        bool host_has_cfg;
+        uint32_t primask = __get_PRIMASK();
+        __disable_irq();
+        {
+            const RadarSettings& settings = usbHandler.getSettings();
+            host_has_cfg = settings.isValid() && settings.hasScanConfig();
+            host_cfg = settings.getScanConfig();
+        }
+        __set_PRIMASK(primask);
+
+        if (host_has_cfg && !scanConfigEqual(host_cfg, active_scan_cfg)) {
+            if (applyScanConfig(host_cfg)) {
+                DIAG("SYS", "Scan plan updated: pattern=%u dwells=%u az=%u rev~%lu ms",
+                     active_scan_cfg.pattern, active_dwell_count,
+                     active_scan_cfg.azimuth_positions,
+                     (unsigned long)(scan_revolution_time_us(&active_scan_cfg) / 1000));
+            } else {
+                DIAG_ERR("SYS", "Host scan plan rejected; keeping current plan");
+            }
+        }
+    }
+
     snprintf(msg, sizeof(msg), "Starting RADAR Sequence #%d\r\n", ++sequence_count);
     HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), 1000);
-    DIAG("SYS", "runRadarPulseSequence #%d: m_max=%d n_max=%d y_max=%d",
-         sequence_count, m_max, n_max, y_max);
+    DIAG("SYS", "runRadarPulseSequence #%d: dwells=%u azimuth=%u/%u",
+         sequence_count, active_dwell_count, azimuth_index + 1,
+         active_scan_cfg.azimuth_positions);
 
     // Configure for fast switching
     DIAG("BF", "Enabling fast-switch mode for beam sweep");
     adarManager.setFastSwitchMode(true);
 
-    int m = 1; // Chirp counter
-    int n = 1; // Beam Elevation position counter
-    int y = 1; // Beam Azimuth counter
-
-    // Main beam steering sequence
-    for(int beam_pos = 0; beam_pos < 15; beam_pos++) {
-    	HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_9);// Notify FPGA of elevation change
-    	DIAG("SYS", "Beam pos %d/15: elevation GPIO toggle, patterns matrix1/vector_0/matrix2", beam_pos);
-        // Pattern 1: matrix1 (positive steering angles)
-        adarManager.setCustomBeamPattern16(matrix1[beam_pos], ADAR1000Manager::BeamDirection::TX);
-        adarManager.setCustomBeamPattern16(matrix1[beam_pos], ADAR1000Manager::BeamDirection::RX);
-
+    // Elevation dwells: one 16 long + 16 short chirp burst per dwell
+    for (uint8_t d = 0; d < active_dwell_count; d++) {
+        if (active_dwells[d].toggle_elevation) {
+            HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_9);// Notify FPGA of elevation change
+        }
+        setDwellBeam(active_dwells[d]);
         executeChirpSequence(m_max/2, T1, PRI1, T2, PRI2);
-        m += m_max/2;
-
-        // Pattern 2: vector_0 (broadside)
-        adarManager.setCustomBeamPattern16(vector_0, ADAR1000Manager::BeamDirection::TX);
-        adarManager.setCustomBeamPattern16(vector_0, ADAR1000Manager::BeamDirection::RX);
-
-        executeChirpSequence(m_max/2, T1, PRI1, T2, PRI2);
-        m += m_max/2;
-
-        // Pattern 3: matrix2 (negative steering angles)
-        adarManager.setCustomBeamPattern16(matrix2[beam_pos], ADAR1000Manager::BeamDirection::TX);
-        adarManager.setCustomBeamPattern16(matrix2[beam_pos], ADAR1000Manager::BeamDirection::RX);
-
-        executeChirpSequence(m_max/2, T1, PRI1, T2, PRI2);
-        m += m_max/2;
-
-        // Reset chirp counter if needed
-        if(m > m_max) m = 1;
-
-        n++;
-        if(n > n_max) n = 1;
-
     }
 
     HAL_GPIO_TogglePin(GPIOD,GPIO_PIN_10);//Tell FPGA that there is a new azimuth
     DIAG("SYS", "Azimuth GPIO toggle (GPIOD pin 10), stepping motor");
 
-    y++; if(y>y_max)y=1;
-	  //Rotate stepper to next y position
-	  for(int k= 0;k<(int)(Stepper_steps/y_max);k++){
+	  //Rotate stepper to next azimuth position
+	  uint16_t steps = scan_steps_per_position(&active_scan_cfg);
+	  for(uint16_t k = 0; k < steps; k++){
 		  HAL_GPIO_WritePin(STEPPER_CLK_P_GPIO_Port, STEPPER_CLK_P_Pin, GPIO_PIN_SET);
-		  delay_us(500);
+		  delay_us(active_scan_cfg.step_half_period_us);
 		  HAL_GPIO_WritePin(STEPPER_CLK_P_GPIO_Port, STEPPER_CLK_P_Pin, GPIO_PIN_RESET);
-		  delay_us(500);
+		  delay_us(active_scan_cfg.step_half_period_us);
 	  }
-    DIAG("MOT", "Stepper moved %d steps for azimuth position y=%d", (int)(Stepper_steps/y_max), y);
-
-
+    azimuth_index++;
+    if (azimuth_index >= active_scan_cfg.azimuth_positions) azimuth_index = 0;
+    DIAG("MOT", "Stepper moved %u steps, next azimuth index=%u", steps, azimuth_index);
 
     snprintf(msg, sizeof(msg), "RADAR Sequence #%d Completed\r\n", sequence_count);
     HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), 1000);

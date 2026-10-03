@@ -99,10 +99,13 @@ reg signed [15:0] overlap_cache_q [0:OVERLAP_SAMPLES-1];
 reg [7:0] overlap_copy_count;
 
 // Microcontroller sync detection
+// mc_new_* are TOGGLE signals (radar_mode_controller flips them once per
+// event), so every transition is an event.  Detecting only the rising edge
+// silently dropped every second chirp.
 reg mc_new_chirp_prev, mc_new_elevation_prev, mc_new_azimuth_prev;
-wire chirp_start_pulse = mc_new_chirp && !mc_new_chirp_prev;
-wire elevation_change_pulse = mc_new_elevation && !mc_new_elevation_prev;
-wire azimuth_change_pulse = mc_new_azimuth && !mc_new_azimuth_prev;
+wire chirp_start_pulse = mc_new_chirp ^ mc_new_chirp_prev;
+wire elevation_change_pulse = mc_new_elevation ^ mc_new_elevation_prev;
+wire azimuth_change_pulse = mc_new_azimuth ^ mc_new_azimuth_prev;
 
 // Processing chain signals
 wire [15:0] fft_pc_i, fft_pc_q;
@@ -243,6 +246,10 @@ always @(posedge clk or negedge reset_n) begin
                     // SHORT CHIRP: Only 50 samples, then zero-pad
                     if (!use_long_chirp) begin
                         if (chirp_samples_collected >= SHORT_CHIRP_SAMPLES - 1) begin
+                            // Single segment: mark the chirp complete so
+                            // ST_OUTPUT returns to IDLE instead of looping
+                            // back to ST_COLLECT_DATA forever.
+                            chirp_complete <= 1;
                             state <= ST_ZERO_PAD;
                             `ifdef SIMULATION
                             $display("[MULTI_SEG_FIXED] Short chirp: collected %d samples, starting zero-pad",

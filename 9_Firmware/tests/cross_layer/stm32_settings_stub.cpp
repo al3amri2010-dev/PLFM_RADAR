@@ -8,6 +8,7 @@
  *
  * Compile: c++ -std=c++11 -o stm32_settings_stub stm32_settings_stub.cpp \
  *          ../../9_Firmware/9_1_Microcontroller/9_1_1_C_Cpp_Libraries/RadarSettings.cpp \
+ *          -x c++ ../../9_Firmware/9_1_Microcontroller/9_1_1_C_Cpp_Libraries/scan_config.c -x none \
  *          -I../../9_Firmware/9_1_Microcontroller/9_1_1_C_Cpp_Libraries/
  *
  * Usage:  ./stm32_settings_stub packet.bin
@@ -81,6 +82,14 @@ int main(int argc, char* argv[]) {
     printf("prf2=%.17g\n", settings.getPRF2());
     printf("max_distance=%.17g\n", settings.getMaxDistance());
     printf("map_size=%.17g\n", settings.getMapSize());
+
+    const scan_config_t& scan = settings.getScanConfig();
+    printf("has_scan_config=%s\n", settings.hasScanConfig() ? "true" : "false");
+    printf("scan_pattern=%u\n", (unsigned)scan.pattern);
+    printf("scan_uniform_beams=%u\n", (unsigned)scan.uniform_beams);
+    printf("scan_uniform_max_angle_deg=%.9g\n", (double)scan.uniform_max_angle_deg);
+    printf("scan_azimuth_positions=%u\n", (unsigned)scan.azimuth_positions);
+    printf("scan_step_half_period_us=%u\n", (unsigned)scan.step_half_period_us);
 
     return 0;
 }

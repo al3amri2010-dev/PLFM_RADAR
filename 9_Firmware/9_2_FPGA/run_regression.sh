@@ -487,6 +487,11 @@ run_test "Matched Filter Chain" \
     tb/tb_matched_filter_processing_chain.v matched_filter_processing_chain.v \
     fft_engine.v chirp_memory_loader_param.v
 
+run_test "MF Chirp Trigger (toggle edges, short-chirp completion)" \
+    tb/tb_mf_trigger_reg.vvp \
+    tb/tb_mf_chirp_trigger.v matched_filter_multi_segment.v \
+    matched_filter_processing_chain.v fft_engine.v frequency_matched_filter.v
+
 echo ""
 
 # ===========================================================================

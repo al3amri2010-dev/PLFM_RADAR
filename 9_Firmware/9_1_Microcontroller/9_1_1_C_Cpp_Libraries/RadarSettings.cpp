@@ -16,79 +16,115 @@ void RadarSettings::resetToDefaults() {
     prf2 = 2000.0;               // 2 kHz
     max_distance = 50000.0;      // 50 km
     map_size = 50000.0;          // 50 km
+
+    scan_config_default(&scan_config);
+    has_scan_config = false;
     
     settings_valid = true;
 }
 
 bool RadarSettings::parseFromUSB(const uint8_t* data, uint32_t length) {
-    // Minimum packet size: "SET" + 9 doubles + 1 uint32_t + "END" = 3 + 9*8 + 4 + 3 = 82 bytes
-    if (data == nullptr || length < 82) {
-        settings_valid = false;
+    // Accepted layouts (all multi-byte fields big-endian):
+    //   legacy (82 B):  "SET" + 9 doubles + 1 uint32 + "END"
+    //   scan   (98 B):  legacy fields + "SCN" + pattern u8 + uniform_beams u8
+    //                   + uniform_max_angle_deg double + azimuth_positions u8
+    //                   + step_half_period_us u16 + "END"
+    // Parsing is all-or-nothing: a packet that fails any check leaves the
+    // previously accepted settings untouched.
+    if (data == nullptr ||
+        (length != PACKET_SIZE_LEGACY && length != PACKET_SIZE_WITH_SCAN)) {
         return false;
     }
     
     // Check for start marker "SET"
     if (memcmp(data, "SET", 3) != 0) {
-        settings_valid = false;
         return false;
     }
     
     // Check for end marker "END"
     if (memcmp(data + length - 3, "END", 3) != 0) {
-        settings_valid = false;
         return false;
     }
     
+    RadarSettings parsed;   // starts from defaults (legacy scan plan)
     uint32_t offset = 3;  // Skip "SET"
     
     // Extract all parameters in order
-    system_frequency = extractDouble(data + offset);
+    parsed.system_frequency = extractDouble(data + offset);
     offset += 8;
     
-    chirp_duration_1 = extractDouble(data + offset);
+    parsed.chirp_duration_1 = extractDouble(data + offset);
     offset += 8;
     
-    chirp_duration_2 = extractDouble(data + offset);
+    parsed.chirp_duration_2 = extractDouble(data + offset);
     offset += 8;
     
-    chirps_per_position = extractUint32(data + offset);
+    parsed.chirps_per_position = extractUint32(data + offset);
     offset += 4;
     
-    freq_min = extractDouble(data + offset);
+    parsed.freq_min = extractDouble(data + offset);
     offset += 8;
     
-    freq_max = extractDouble(data + offset);
+    parsed.freq_max = extractDouble(data + offset);
     offset += 8;
     
-    prf1 = extractDouble(data + offset);
+    parsed.prf1 = extractDouble(data + offset);
     offset += 8;
     
-    prf2 = extractDouble(data + offset);
+    parsed.prf2 = extractDouble(data + offset);
     offset += 8;
     
-    max_distance = extractDouble(data + offset);
+    parsed.max_distance = extractDouble(data + offset);
     offset += 8;
     
-    map_size = extractDouble(data + offset);
+    parsed.map_size = extractDouble(data + offset);
+    offset += 8;
+
+    if (length == PACKET_SIZE_WITH_SCAN) {
+        if (memcmp(data + offset, "SCN", 3) != 0) {
+            return false;
+        }
+        offset += 3;
+        parsed.scan_config.pattern = data[offset];
+        offset += 1;
+        parsed.scan_config.uniform_beams = data[offset];
+        offset += 1;
+        parsed.scan_config.uniform_max_angle_deg = (float)extractDouble(data + offset);
+        offset += 8;
+        parsed.scan_config.azimuth_positions = data[offset];
+        offset += 1;
+        parsed.scan_config.step_half_period_us = extractUint16(data + offset);
+        parsed.has_scan_config = true;
+    }
     
     // Validate the received settings
-    settings_valid = validateSettings();
-    
-    return settings_valid;
+    if (!parsed.validateSettings()) {
+        return false;
+    }
+
+    parsed.settings_valid = true;
+    *this = parsed;
+    return true;
+}
+
+// Written as !(lo <= v && v <= hi) so NaN is rejected (every NaN comparison is false)
+static bool inRange(double v, double lo, double hi) {
+    return lo <= v && v <= hi;
 }
 
 bool RadarSettings::validateSettings() {
     // Check for reasonable value ranges
-    if (system_frequency < 1e9 || system_frequency > 100e9) return false;
-    if (chirp_duration_1 < 1e-6 || chirp_duration_1 > 1000e-6) return false;
-    if (chirp_duration_2 < 0.1e-6 || chirp_duration_2 > 10e-6) return false;
+    if (!inRange(system_frequency, 1e9, 100e9)) return false;
+    if (!inRange(chirp_duration_1, 1e-6, 1000e-6)) return false;
+    if (!inRange(chirp_duration_2, 0.1e-6, 10e-6)) return false;
     if (chirps_per_position < 1 || chirps_per_position > 256) return false;
-    if (freq_min < 1e6 || freq_min > 100e6) return false;
-    if (freq_max <= freq_min || freq_max > 100e6) return false;
-    if (prf1 < 100 || prf1 > 10000) return false;
-    if (prf2 < 100 || prf2 > 10000) return false;
-    if (max_distance < 100 || max_distance > 100000) return false;
-    if (map_size < 1000 || map_size > 200000) return false;
+    if (!inRange(freq_min, 1e6, 100e6)) return false;
+    if (!(freq_max > freq_min) || !inRange(freq_max, 1e6, 100e6)) return false;
+    if (!inRange(prf1, 100, 10000)) return false;
+    if (!inRange(prf2, 100, 10000)) return false;
+    if (!inRange(max_distance, 100, 100000)) return false;
+    if (!inRange(map_size, 1000, 200000)) return false;
+    if (scan_config_validate(&scan_config) != SCAN_OK) return false;
     
     return true;
 }
@@ -110,4 +146,8 @@ uint32_t RadarSettings::extractUint32(const uint8_t* data) {
         value = (value << 8) | data[i];
     }
     return value;
+}
+
+uint16_t RadarSettings::extractUint16(const uint8_t* data) {
+    return (uint16_t)(((uint16_t)data[0] << 8) | data[1]);
 }

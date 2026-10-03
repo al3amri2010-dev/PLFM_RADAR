@@ -714,11 +714,16 @@ class TestTier1STM32SettingsPacket:
         # Add markers: "SET"(3) + "END"(3)
         required_size = 3 + total_field_bytes + 3
 
-        # Read the actual minimum check from the source
-        src = (cp.MCU_LIB_DIR / "RadarSettings.cpp").read_text(encoding="latin-1")
+        # The parser accepts exact layouts only; the legacy size is declared
+        # as RadarSettings::PACKET_SIZE_LEGACY and enforced in parseFromUSB.
         import re
-        m = re.search(r'length\s*<\s*(\d+)', src)
-        assert m, "Could not find minimum length check in parseFromUSB"
+        hdr = (cp.MCU_LIB_DIR / "RadarSettings.h").read_text(encoding="latin-1")
+        src = (cp.MCU_LIB_DIR / "RadarSettings.cpp").read_text(encoding="latin-1")
+        m = re.search(r'PACKET_SIZE_LEGACY\s*=\s*(\d+)', hdr)
+        assert m, "Could not find PACKET_SIZE_LEGACY in RadarSettings.h"
+        assert re.search(r'length\s*!=\s*PACKET_SIZE_LEGACY', src), (
+            "parseFromUSB must reject lengths other than the declared layouts"
+        )
         declared_min = int(m.group(1))
 
         assert declared_min == required_size, (
@@ -1133,11 +1138,13 @@ class TestTier3CStub:
         workdir = tmp_path_factory.mktemp("c_stub")
         stub_src = THIS_DIR / "stm32_settings_stub.cpp"
         radar_settings_src = cp.MCU_LIB_DIR / "RadarSettings.cpp"
+        scan_config_src = cp.MCU_LIB_DIR / "scan_config.c"
         out_bin = workdir / "stm32_settings_stub"
 
         result = subprocess.run(
             [CXX, "-std=c++11", "-o", str(out_bin),
              str(stub_src), str(radar_settings_src),
+             "-x", "c++", str(scan_config_src), "-x", "none",
              f"-I{cp.MCU_LIB_DIR}"],
             capture_output=True, text=True, timeout=30,
         )
@@ -1240,6 +1247,59 @@ class TestTier3CStub:
                 )
             else:
                 assert actual == expected, f"{key}: {actual} != {expected}"
+
+    def test_scan_block_round_trip(self, stub_binary):
+        """Optional 'SCN' scan block (98-byte packet) must parse field-exact."""
+        values = {
+            "system_frequency": 10.5e9, "chirp_duration_1": 30.0e-6,
+            "chirp_duration_2": 0.5e-6, "chirps_per_position": 32,
+            "freq_min": 10.0e6, "freq_max": 30.0e6,
+            "prf1": 1000.0, "prf2": 2000.0,
+            "max_distance": 3000.0, "map_size": 6000.0,
+        }
+        pkt = self._build_settings_packet(values)
+        scan = (b"SCN" + struct.pack(">BBdBH", 1, 15, 44.4, 40, 750))
+        pkt = pkt[:-3] + scan + b"END"
+        assert len(pkt) == 98
+        result = self._run_stub(stub_binary, pkt)
+
+        assert result.get("parse_ok") == "true", f"Parse failed: {result}"
+        assert result["has_scan_config"] == "true"
+        assert result["scan_pattern"] == "1"
+        assert result["scan_uniform_beams"] == "15"
+        assert abs(float(result["scan_uniform_max_angle_deg"]) - 44.4) < 1e-4
+        assert result["scan_azimuth_positions"] == "40"
+        assert result["scan_step_half_period_us"] == "750"
+
+    def test_legacy_packet_keeps_legacy_scan(self, stub_binary):
+        """82-byte legacy packet must leave the legacy scan plan in place."""
+        values = {
+            "system_frequency": 10.0e9, "chirp_duration_1": 30.0e-6,
+            "chirp_duration_2": 0.5e-6, "chirps_per_position": 32,
+            "freq_min": 10.0e6, "freq_max": 30.0e6,
+            "prf1": 1000.0, "prf2": 2000.0,
+            "max_distance": 50000.0, "map_size": 50000.0,
+        }
+        result = self._run_stub(stub_binary, self._build_settings_packet(values))
+        assert result.get("parse_ok") == "true"
+        assert result["has_scan_config"] == "false"
+        assert result["scan_pattern"] == "0"
+        assert result["scan_azimuth_positions"] == "50"
+
+    def test_scan_block_with_coverage_gap_rejected(self, stub_binary):
+        """A scan block that would leave azimuth gaps must be rejected."""
+        values = {
+            "system_frequency": 10.5e9, "chirp_duration_1": 30.0e-6,
+            "chirp_duration_2": 0.5e-6, "chirps_per_position": 32,
+            "freq_min": 10.0e6, "freq_max": 30.0e6,
+            "prf1": 1000.0, "prf2": 2000.0,
+            "max_distance": 3000.0, "map_size": 6000.0,
+        }
+        pkt = self._build_settings_packet(values)
+        scan = (b"SCN" + struct.pack(">BBdBH", 1, 15, 44.4, 25, 750))
+        pkt = pkt[:-3] + scan + b"END"
+        result = self._run_stub(stub_binary, pkt)
+        assert result.get("parse_ok") == "false"
 
     def test_truncated_packet_rejected(self, stub_binary):
         """Packet shorter than minimum must be rejected."""
